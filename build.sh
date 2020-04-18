@@ -23,6 +23,14 @@ IPHONEOS_SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 IPHONESIMULATOR_PLATFORM=$(xcrun --sdk iphonesimulator --show-sdk-platform-path)
 IPHONESIMULATOR_SDK=$(xcrun --sdk iphonesimulator --show-sdk-path)
 
+TVOS_SDK_VERSION=$(xcrun --sdk appletvos --show-sdk-version)
+TVOS_DEPLOYMENT_VERSION="10.0"
+TVOS_PLATFORM=$(xcrun --sdk appletvos --show-sdk-platform-path)
+TVOS_SDK=$(xcrun --sdk appletvos --show-sdk-path)
+
+TVSIMULATOR_PLATFORM=$(xcrun --sdk appletvsimulator --show-sdk-platform-path)
+TVSIMULATOR_SDK=$(xcrun --sdk appletvsimulator --show-sdk-path)
+
 OSX_SDK_VERSION=$(xcrun --sdk macosx --show-sdk-version)
 OSX_DEPLOYMENT_VERSION="10.8"
 OSX_PLATFORM=$(xcrun --sdk macosx --show-sdk-platform-path)
@@ -58,6 +66,36 @@ configure() {
    fi
 }
 
+configure_tvos() {
+   local OS=$1
+   local ARCH=$2
+   local PLATFORM=$3
+   local SDK_VERSION=$4
+   local DEPLOYMENT_VERSION=$5
+   local BUILD_DIR=$6
+   local SRC_DIR=$7
+
+   echo "Configuring for ${PLATFORM##*/} ${ARCH}"
+
+   export CROSS_TOP="${PLATFORM}/Developer"
+   export CROSS_SDK="${OS}${SDK_VERSION}.sdk"
+
+   if [ "$ARCH" == "x86_64" ]; then
+       ${SRC_DIR}/Configure darwin64-x86_64-cc --prefix="${BUILD_DIR}/${OPENSSL_VERSION}-${ARCH}" &> "${BUILD_DIR}/${OPENSSL_VERSION}-${ARCH}.log"
+       sed -ie "s!^CFLAG=!CFLAG=-isysroot ${CROSS_TOP}/SDKs/${CROSS_SDK} -arch $ARCH -mappletvsimulator-version-min=${DEPLOYMENT_VERSION} -mappletvos-version-min=${DEPLOYMENT_VERSION} -DHAVE_FORK=0 ! " "${SRC_DIR}/Makefile"
+       sed -ie "s!^CFLAGS=!CFLAGS=-isysroot ${CROSS_TOP}/SDKs/${CROSS_SDK} -arch $ARCH -mappletvsimulator-version-min=${DEPLOYMENT_VERSION} -mappletvos-version-min=${DEPLOYMENT_VERSION} -DHAVE_FORK=0 !" "${SRC_DIR}/Makefile"
+   elif [ "$ARCH" == "i386" ]; then
+       ${SRC_DIR}/Configure darwin-i386-cc --prefix="${BUILD_DIR}/${OPENSSL_VERSION}-${ARCH}" &> "${BUILD_DIR}/${OPENSSL_VERSION}-${ARCH}-conf.log"
+       sed -ie "s!^CFLAG=!CFLAG=-isysroot ${CROSS_TOP}/SDKs/${CROSS_SDK} -arch $ARCH -mappletvsimulator-version-min=${DEPLOYMENT_VERSION} -mappletvos-version-min=${DEPLOYMENT_VERSION} -DHAVE_FORK=0 !" "${SRC_DIR}/Makefile"
+       sed -ie "s!^CFLAGS=!CFLAGS=-isysroot ${CROSS_TOP}/SDKs/${CROSS_SDK} -arch $ARCH -mappletvsimulator-version-min=${DEPLOYMENT_VERSION} -mappletvos-version-min=${DEPLOYMENT_VERSION} -DHAVE_FORK=0 !" "${SRC_DIR}/Makefile"
+   else
+       ${SRC_DIR}/Configure appletvos-cross -no-asm --prefix="${BUILD_DIR}/${OPENSSL_VERSION}-${ARCH}" &> "${BUILD_DIR}/${OPENSSL_VERSION}-${ARCH}.log"
+       sed -ie "s!^CFLAG=!CFLAG=-mappletvsimulator-version-min=${DEPLOYMENT_VERSION} -mappletvos-version-min=${DEPLOYMENT_VERSION} -arch ${ARCH} -DHAVE_FORK=0 !" "${SRC_DIR}/Makefile"
+       sed -ie "s!^CFLAGS=!CFLAGS=-mappletvsimulator-version-min=${DEPLOYMENT_VERSION} -mappletvos-version-min=${DEPLOYMENT_VERSION} -arch ${ARCH} -DHAVE_FORK=0 !" "${SRC_DIR}/Makefile"
+       perl -i -pe 's|static volatile sig_atomic_t intr_signal|static volatile int intr_signal|' ${SRC_DIR}/crypto/ui/ui_openssl.c
+   fi
+}
+
 build()
 {
    local ARCH=$1
@@ -69,6 +107,8 @@ build()
 
    mkdir -p "${SRC_DIR}"
    tar xzf "${SCRIPT_DIR}/openssl-${OPENSSL_VERSION}.tar.gz" -C "${SRC_DIR}" --strip-components=1
+   
+   patch -p1 -d "${SRC_DIR}" < "${SCRIPT_DIR}/Configure.diff"
 
    echo "Building for ${SDK##*/} ${ARCH}"
 
@@ -89,6 +129,13 @@ build()
          configure "iPhoneSimulator" $ARCH ${IPHONESIMULATOR_PLATFORM} ${IPHONEOS_SDK_VERSION} ${IPHONEOS_DEPLOYMENT_VERSION} ${BUILD_DIR} ${SRC_DIR}
       else
          configure "iPhoneOS" $ARCH ${IPHONEOS_PLATFORM} ${IPHONEOS_SDK_VERSION} ${IPHONEOS_DEPLOYMENT_VERSION} ${BUILD_DIR} ${SRC_DIR}
+      fi
+   elif [ "$TYPE" == "tvos" ]; then
+      # IOS
+      if [ "$ARCH" == "x86_64" ] || [ "$ARCH" == "i386" ]; then
+         configure_tvos "AppleTVSimulator" $ARCH ${TVSIMULATOR_PLATFORM} ${TVOS_SDK_VERSION} ${TVOS_DEPLOYMENT_VERSION} ${BUILD_DIR} ${SRC_DIR}
+      else
+         configure_tvos "AppleTVOS" $ARCH ${TVOS_PLATFORM} ${TVOS_SDK_VERSION} ${TVOS_DEPLOYMENT_VERSION} ${BUILD_DIR} ${SRC_DIR}
       fi
    elif [ "$TYPE" == "macos" ]; then
       #OSX
@@ -174,6 +221,28 @@ build_ios() {
    rm -rf ${TMP_DIR}
 }
 
+build_tvos() {
+   local TMP_DIR=$( mktemp -d )
+
+   # Clean up whatever was left from our previous build
+   rm -rf ${SCRIPT_DIR}/{tvos/include,tvos/lib}
+   mkdir -p ${SCRIPT_DIR}/{tvos/include,tvos/lib}
+
+   build "x86_64" ${TVSIMULATOR_SDK} ${TMP_DIR} "tvos"
+   build "arm64"  ${TVOS_SDK} ${TMP_DIR} "tvos"
+
+   # Copy headers
+   cp -r ${TMP_DIR}/${OPENSSL_VERSION}-arm64/include/openssl ${SCRIPT_DIR}/tvos/include
+   cp -f ${SCRIPT_DIR}/shim/shim.h ${SCRIPT_DIR}/tvos/include/openssl/shim.h
+
+   cp -f ${TMP_DIR}/${OPENSSL_VERSION}-x86_64/include/openssl/opensslconf-x86_64.h ${SCRIPT_DIR}/tvos/include/openssl
+   cp -f ${TMP_DIR}/${OPENSSL_VERSION}-arm64/include/openssl/opensslconf-arm64.h ${SCRIPT_DIR}/tvos/include/openssl
+
+   generate_opensslconfh ${SCRIPT_DIR}/tvos/include/openssl/opensslconf.h
+
+   rm -rf ${TMP_DIR}
+}
+
 build_macos() {
    local TMP_DIR=$( mktemp -d )
 
@@ -206,6 +275,7 @@ fi
 
 build_ios
 build_macos
+build_tvos
 
 ${SCRIPT_DIR}/create-framework.sh
 
